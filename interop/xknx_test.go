@@ -25,7 +25,7 @@ import (
 	"github.com/cB-Sigma/knx-sim/sim"
 )
 
-const image = "sigma-knxsim-xknx:3.20.0"
+const image = "sigma-knxsim-xknx:3.20.0-r2"
 
 func needDocker(t *testing.T) {
 	t.Helper()
@@ -58,6 +58,10 @@ func hostIPv4(t *testing.T) string {
 // startSim serves the simulator on every interface (UDP and TCP on the
 // same port number), so that the container can reach it.
 func startSim(t *testing.T, sec *sim.SecureConfig) (*sim.Server, int) {
+	return startSimOpts(t, sim.Options{Secure: sec})
+}
+
+func startSimOpts(t *testing.T, o sim.Options) (*sim.Server, int) {
 	t.Helper()
 	l, err := net.Listen("tcp4", "0.0.0.0:0")
 	if err != nil {
@@ -65,7 +69,8 @@ func startSim(t *testing.T, sec *sim.SecureConfig) (*sim.Server, int) {
 	}
 	port := l.Addr().(*net.TCPAddr).Port
 	_ = l.Close()
-	s, err := sim.StartWith(sim.Options{Listen: fmt.Sprintf("0.0.0.0:%d", port), TCP: true, ListenTCP: fmt.Sprintf("0.0.0.0:%d", port), Secure: sec})
+	o.Listen, o.TCP, o.ListenTCP = fmt.Sprintf("0.0.0.0:%d", port), true, fmt.Sprintf("0.0.0.0:%d", port)
+	s, err := sim.StartWith(o)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,6 +183,35 @@ func TestXknxSecureTunnel(t *testing.T) {
 	tunnelTest(t, s, kr, "secure", hostIPv4(t), fmt.Sprint(port), "2", "keyring-pass")
 	if s.Sessions() == 0 {
 		t.Error("no secure session was authenticated")
+	}
+}
+
+// TestXknxDataSecureTunnel: xknx reads the KNX Data Secure group keys and
+// senders from a keyring the simulator wrote and tunnels over UDP to a
+// simulator whose bus secures 1/1/7 and 1/2/3: the simulator opens xknx's
+// sealed write, xknx opens the simulator's sealed answer to its read, and
+// plain groups still work.
+// Covers: SIG-IPE-6701
+func TestXknxDataSecureTunnel(t *testing.T) {
+	needDocker(t)
+	keys := map[string][]byte{"1/1/7": bytes.Repeat([]byte{0x11}, 16), "1/2/3": bytes.Repeat([]byte{0x23}, 16)}
+	table := map[knx.GroupAddress][]byte{}
+	for g, k := range keys {
+		ga, _ := knx.ParseGroupAddress(g)
+		table[ga] = k
+	}
+	ds, err := knx.NewDataSecure(knx.DataSecureOptions{GroupKeys: table,
+		Senders: map[knx.IndividualAddress]uint64{0x11F1: 0, 0x11F2: 0, 0x11F3: 0, 0x11F4: 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, port := startSimOpts(t, sim.Options{DataSecure: ds})
+	kr := sim.ETSKeyring(sim.KeyringOptions{Project: "Demo", Password: "keyring-pass", Host: "1.1.255", DeviceAuth: "gateway-auth",
+		Tunnels:      []sim.KeyringTunnel{{Address: "1.1.241", UserID: 2, Password: "tunnel-pass"}},
+		SecureGroups: keys, Senders: []string{"1.1.10", "1.1.241", "1.1.242", "1.1.243", "1.1.244"}})
+	tunnelTest(t, s, kr, "datasecure", hostIPv4(t), fmt.Sprint(port), "keyring-pass")
+	if n := s.DataSecureRefused(); n != 0 {
+		t.Errorf("the simulator refused %d of xknx's frames", n)
 	}
 }
 

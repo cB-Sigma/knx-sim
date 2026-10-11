@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash/crc32"
 	"html"
+	"sort"
 	"strings"
 
 	"github.com/cB-Sigma/knx"
@@ -206,7 +207,15 @@ type KeyringOptions struct {
 	Host       string // the IP interface's individual address
 	DeviceAuth string // its device authentication code
 	Tunnels    []KeyringTunnel
-	GroupKeys  int // KNX Data Secure group keys to list
+	GroupKeys  int // KNX Data Secure group keys to list (all-zero demo keys)
+	// SecureGroups are KNX Data Secure groups with their real keys (group
+	// address such as "1/1/7" → 16-byte key), listed for every tunnel
+	// with Senders as the addresses that send to them.
+	SecureGroups map[string][]byte
+	Senders      []string
+	// BackboneKey adds a secure routing backbone (multicast 224.0.23.12,
+	// latency 1000ms) with this 16-byte key.
+	BackboneKey []byte
 }
 
 // ETSKeyring builds a signed .knxkeys export.
@@ -222,14 +231,41 @@ func ETSKeyring(o KeyringOptions) []byte {
 	// ETS writes the host's device authentication code on each of its
 	// tunnelling interfaces too (as the ETS keyrings in xknx's test suite
 	// show), and clients such as xknx take it from the interface.
-	for _, t := range o.Tunnels {
-		fmt.Fprintf(&b, "  <Interface Type=\"Tunneling\" Host=\"%s\" IndividualAddress=\"%s\" UserID=\"%d\" Password=\"%s\" Authentication=\"%s\" />\n",
-			o.Host, t.Address, t.UserID, seal(t.Password), seal(o.DeviceAuth))
+	if o.BackboneKey != nil {
+		fmt.Fprintf(&b, "  <Backbone MulticastAddress=\"224.0.23.12\" Latency=\"1000\" Key=\"%s\" />\n", knx.SealKeyringKey(o.Password, created, o.BackboneKey))
 	}
-	if o.GroupKeys > 0 {
+	var gas []string
+	for g := range o.SecureGroups {
+		gas = append(gas, g)
+	}
+	sort.Strings(gas)
+	raw := func(g string) int {
+		a, err := knx.ParseGroupAddress(g)
+		if err != nil {
+			panic(err)
+		}
+		return int(a)
+	}
+	for _, t := range o.Tunnels {
+		fmt.Fprintf(&b, "  <Interface Type=\"Tunneling\" Host=\"%s\" IndividualAddress=\"%s\" UserID=\"%d\" Password=\"%s\" Authentication=\"%s\"",
+			o.Host, t.Address, t.UserID, seal(t.Password), seal(o.DeviceAuth))
+		if len(gas) == 0 {
+			b.WriteString(" />\n")
+			continue
+		}
+		b.WriteString(">\n")
+		for _, g := range gas {
+			fmt.Fprintf(&b, "    <Group Address=\"%d\" Senders=\"%s\" />\n", raw(g), strings.Join(o.Senders, " "))
+		}
+		b.WriteString("  </Interface>\n")
+	}
+	if o.GroupKeys > 0 || len(gas) > 0 {
 		b.WriteString("  <GroupAddresses>\n")
 		for i := range o.GroupKeys {
 			fmt.Fprintf(&b, "    <Group Address=\"%d\" Key=\"AAAAAAAAAAAAAAAAAAAAAA==\" />\n", 2048+i)
+		}
+		for _, g := range gas {
+			fmt.Fprintf(&b, "    <Group Address=\"%d\" Key=\"%s\" />\n", raw(g), knx.SealKeyringKey(o.Password, created, o.SecureGroups[g]))
 		}
 		b.WriteString("  </GroupAddresses>\n")
 	}

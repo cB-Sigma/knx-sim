@@ -11,6 +11,7 @@ devices, and prints one line per event:
 
     client.py udp|tcp HOST PORT
     client.py secure HOST PORT USER_ID KEYRING_PASSWORD   (keyring on stdin)
+    client.py datasecure HOST PORT KEYRING_PASSWORD      (UDP, Data Secure; keyring on stdin)
     client.py search HOST PORT                            (unicast description)
 """
 
@@ -47,6 +48,14 @@ async def tunnel(kind, host, port, user_id=None, keyring_password=None):
     elif kind == "tcp":
         cfg = ConnectionConfig(connection_type=ConnectionType.TUNNELING_TCP, gateway_ip=host, gateway_port=port,
                                auto_reconnect=False)
+    elif kind == "datasecure":
+        # A plain UDP tunnel; KNX Data Secure from the keyring on stdin.
+        fd, path = tempfile.mkstemp(suffix=".knxkeys")
+        with os.fdopen(fd, "wb") as f:
+            f.write(sys.stdin.buffer.read())
+        cfg = ConnectionConfig(connection_type=ConnectionType.TUNNELING, gateway_ip=host, gateway_port=port,
+                               route_back=True, auto_reconnect=False,
+                               secure_config=SecureConfig(knxkeys_file_path=path, knxkeys_password=keyring_password))
     else:
         fd, path = tempfile.mkstemp(suffix=".knxkeys")
         with os.fdopen(fd, "wb") as f:
@@ -123,6 +132,8 @@ def main():
         asyncio.run(search(host, port))
     elif kind == "secure":
         asyncio.run(tunnel(kind, host, port, int(sys.argv[4]), sys.argv[5]))
+    elif kind == "datasecure":
+        asyncio.run(tunnel(kind, host, port, None, sys.argv[4]))
     else:
         asyncio.run(tunnel(kind, host, port))
 

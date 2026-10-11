@@ -1,29 +1,36 @@
 # knx-sim
 
-A simulated KNXnet/IP gateway in Go, with KNX IP Secure, for testing KNX clients without an installation.
+A simulated KNXnet/IP gateway and router in Go, with KNX IP Secure and KNX Data Secure, for testing KNX clients without an installation.
 
 [![Go Reference](https://pkg.go.dev/badge/github.com/cB-Sigma/knx-sim.svg)](https://pkg.go.dev/github.com/cB-Sigma/knx-sim) [![test](https://github.com/cB-Sigma/knx-sim/actions/workflows/test.yml/badge.svg)](https://github.com/cB-Sigma/knx-sim/actions/workflows/test.yml) [![Licence: Apache-2.0](https://img.shields.io/badge/licence-Apache--2.0-blue.svg)](LICENSE) [![Go](https://img.shields.io/badge/go-1.24.0-00ADD8.svg)](go.mod)
 
-The simulator answers search, extended search and description requests,
-accepts tunnels over UDP and TCP, optionally inside KNX IP Secure
-sessions, keeps group objects, answers group reads, puts other bus
-devices' writes on the tunnels, and has switches that make it fail
-(silence, dropped acknowledgements, dropped streams, replayed and
-tampered secure wrappers, ended sessions). It also writes ETS project
-exports (plain, ETS 5 or ETS 6 protected) and signed ETS keyrings for a
-simulated installation. It runs in-process or from the command line and
-is built on [knx](https://github.com/cB-Sigma/knx). Written for SigmaM2M,
-a oneM2M platform; it has no dependency on it.
+The simulator answers search, extended search (with its search
+parameter blocks) and description requests, accepts tunnels over UDP and
+TCP, optionally inside KNX IP Secure sessions, on the link or busmonitor
+layer, keeps group objects, answers group reads, puts other bus devices'
+writes on the tunnels, can secure groups with KNX Data Secure, answers
+device management (descriptor, properties, individual address in
+programming mode), and has switches that make it fail (silence, dropped
+acknowledgements, dropped streams, replayed and tampered secure
+wrappers, ended sessions). A simulated KNX IP router routes plain or KNX
+IP Secure, with Data Secure and flow control. It also writes ETS project
+exports (plain, ETS 5 or ETS 6 protected) and signed ETS keyrings (with
+Data Secure group keys and a backbone key) for a simulated installation.
+It runs in-process or from the command line and is built on
+[knx](https://github.com/cB-Sigma/knx). Written for SigmaM2M, a oneM2M
+platform; it has no dependency on it.
 
 ## What is simulated
 
 | Package | What it does |
 |---|---|
 | `sim` | `Start`, `StartWith(Options)`: the gateway on UDP and, with `TCP` or `Secure`, on TCP; group objects (`Set`, `SetShort`, `Get`), other bus devices (`Inject`, `InjectDuplicate`), what clients sent (`Writes`, `Reads`, `Connects`, `Channels`, `Sessions`, `Keepalives`, `Rejected`, `TCPAcks`), faults (`SetSilent`, `DropAcks`, `DropStreams`, `ReplayLast`, `InjectTampered`, `EndSessions`); ETS files (`ETSProject`, `ProjectXML`, `ETSKeyring`) |
-| `cmd/knxsim` | Serves the gateway with a small demo installation, and writes a matching project export and keyring |
+| `sim` (v0.2.0) | `Options.DataSecure` (secured groups: sealed writes opened, refused ones counted in `DataSecureRefused`, reads and injected writes answered sealed), busmonitor tunnels (L_Busmon.ind of every frame), `Options.ProgrammingMode`, device management to the gateway (`Management`, `Address`, `MaskVersion`), search parameter blocks of the extended search; `StartRouter(RouterOptions)`: a KNX IP router (plain or `Secure`, `DataSecure`, `BusyAbove` for ROUTING_BUSY, `SendBusy`, `SendLostMessage`, `Writes`, `Reads`, `TimeKeeper`); keyrings with `SecureGroups`, `Senders` and `BackboneKey` |
+| `cmd/knxsim` | Serves the gateway with a small demo installation (and with `-routing` a router), and writes a matching project export and keyring |
 
-Not simulated: routing, KNX Data Secure, device management, a real
-gateway's limits and timing beyond four tunnels.
+Not simulated: raw tunnels (refused), connection-oriented device
+management sessions, KNX Data Secure with tool keys, multicast search, a
+real gateway's limits and timing beyond four tunnels.
 
 ## Install
 
@@ -56,6 +63,10 @@ knxsim -listen 127.0.0.1:3671 -tcp 127.0.0.1:3671 -secure-password tunnel-pass \
 | `-project` | | write an ETS project export of the demo installation to this file |
 | `-keyring` | | write an ETS keyring for the secure tunnel to this file |
 | `-keyring-password` | `keyring-pass` | password of the keyring |
+| `-routing` | | also act as a KNX IP router on this routing group, such as `224.0.23.12:3671` |
+| `-routing-interface` | | network interface for `-routing` |
+| `-busy-above` | `0` | send ROUTING_BUSY when more than this many indications arrive within 100ms (0: never) |
+| `-programming-mode` | `false` | put the gateway in programming mode |
 
 The demo installation: 1/2/3 temperature (9.001, reported every
 `-report`), 1/1/7 light (1.001), 1/1/8 dimmer (5.001), 3/0/1 power
@@ -95,7 +106,9 @@ go test -race ./...
 The tests at the module root drive the knx client against the
 simulator: tunnelling over UDP and TCP, repeats and duplicates, the
 heartbeat, KNX IP Secure (handshake, wrong passwords, replayed and
-tampered wrappers, keepalive, session end), and ETS import of the
+tampered wrappers, keepalive, session end), KNX Data Secure, busmonitor
+tunnels, device management, extended search parameters, the router
+(plain and secure, flow control), and ETS import of the
 generated files. Tests carry `// Covers: SIG-...` comments: requirement
 IDs of the SigmaM2M project's compliance report, with no meaning outside
 it. The simulator and the knx client are written by the same author from
@@ -114,7 +127,7 @@ cd interop && SIGMA_KNX_INTEROP=1 go test -v ./...
 ### Interop tested against
 
 On 2026-10-11, Docker Desktop 29.4.3 on arm64, the simulator on the host
-and xknx in a container:
+and xknx in a container (v0.1.0 unless marked):
 
 - xknx 3.20.0's description request and extended search read the
   simulator's name, address, tunnelling over UDP and TCP.
@@ -129,6 +142,15 @@ and xknx in a container:
   protected) with the same group addresses, names and DPTs.
 - Three defects in the simulator were found this way and fixed before
   the first release (see CHANGELOG.md), each with a regression test.
+- xknx 3.20.0 with KNX Data Secure (v0.2.0): xknx read the group keys and
+  senders of a keyring the simulator wrote and tunnelled over UDP to a
+  simulator whose bus secures 1/1/7 and 1/2/3; the simulator opened
+  xknx's sealed write, xknx opened the simulator's sealed answer to its
+  read of 1/2/3, plain groups worked, and nothing was refused. Passed.
+- The simulated router is built on the knx module's router, which was run
+  against xknx 3.20.0 as a router (plain, KNX IP Secure, Data Secure; see
+  the knx module); the router simulator itself was run only against the
+  knx module.
 - Not yet: a client other than xknx and knx, multicast search (the
   simulator answers search only on its unicast address).
 

@@ -19,6 +19,10 @@
 //	knxsim -listen 127.0.0.1:3671 -tcp 127.0.0.1:3671 -secure-password tunnel-pass \
 //	       -keyring home.knxkeys -project home.knxproj
 //
+// -routing also runs a KNX IP router (routing indications, reads answered,
+// -busy-above for flow control); -programming-mode answers
+// IndividualAddress_Read and extended searches for programming mode.
+//
 // -project writes an ETS project export of the demo installation and
 // -keyring a keyring export for the secure tunnel (password
 // -keyring-password), so ETS import can be tried end to end. All
@@ -79,13 +83,17 @@ func run(ctx context.Context, args []string, out io.Writer, ready func(*sim.Serv
 	project := fs.String("project", "", "write an ETS project export (.knxproj) of the demo installation to this file")
 	keyring := fs.String("keyring", "", "write an ETS keyring export (.knxkeys) for the secure tunnel to this file")
 	keyringPassword := fs.String("keyring-password", "keyring-pass", "password of the keyring export")
+	routing := fs.String("routing", "", "also act as a KNX IP router on this routing group, such as 224.0.23.12:3671")
+	routingIface := fs.String("routing-interface", "", "network interface for -routing")
+	busyAbove := fs.Int("busy-above", 0, "send ROUTING_BUSY when more than this many indications arrive within 100ms (0: never)")
+	progMode := fs.Bool("programming-mode", false, "put the gateway in programming mode")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *user < 1 || *user > 127 {
 		return fmt.Errorf("-secure-user %d is not 1..127", *user)
 	}
-	o := sim.Options{Listen: *listen, ListenTCP: *tcp, TCP: *tcp != ""}
+	o := sim.Options{Listen: *listen, ListenTCP: *tcp, TCP: *tcp != "", ProgrammingMode: *progMode}
 	if *password != "" {
 		if o.ListenTCP == "" {
 			o.ListenTCP = "127.0.0.1:3671"
@@ -152,6 +160,18 @@ func run(ctx context.Context, args []string, out io.Writer, ready func(*sim.Serv
 		}
 	}
 	fmt.Fprintln(out)
+	if *routing != "" {
+		r, err := sim.StartRouter(sim.RouterOptions{Group: *routing, Interface: *routingIface, BusyAbove: *busyAbove})
+		if err != nil {
+			return err
+		}
+		defer r.Close()
+		for _, d := range demo {
+			g, _ := knx.ParseGroupAddress(d.ga)
+			r.Set(g, s.Get(g), d.dpt == "DPST-1-1")
+		}
+		fmt.Fprintf(out, "knxsim: router on %s\n", *routing)
+	}
 	if ready != nil {
 		ready(s)
 	}

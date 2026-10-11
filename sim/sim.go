@@ -10,6 +10,11 @@
 // TUNNELLING_ACK) and run KNX IP Secure sessions on those streams
 // (SESSION_REQUEST / RESPONSE / AUTHENTICATE / STATUS, SECURE_WRAPPER with
 // sequence and MAC checks, session timeout).
+//
+// The bus behind it can secure groups with KNX Data Secure; busmonitor
+// tunnels see every frame; the gateway answers device management and, in
+// programming mode, IndividualAddress_Read. [StartRouter] is a simulated
+// KNX IP router (plain or KNX IP Secure, with flow control).
 package sim
 
 import (
@@ -37,7 +42,27 @@ type Options struct {
 	Listen string
 	// ListenTCP is the TCP address (default 127.0.0.1 on a free port).
 	ListenTCP string
+	// DataSecure makes the simulated bus use KNX Data Secure: secured
+	// writes from tunnels are opened (and refused when they do not
+	// verify), and reads of and injected writes to secured groups are
+	// answered sealed, from 1.1.10. Its senders must include the tunnel
+	// addresses (1.1.241 to 1.1.244) that write secured groups.
+	DataSecure *knx.DataSecure
+	// ProgrammingMode puts the gateway in programming mode: it answers
+	// IndividualAddress_Read and extended searches that ask for it.
+	ProgrammingMode bool
 }
+
+// Address is the gateway's individual address; Device10 is the simulated
+// bus device whose writes Inject puts on the tunnels.
+const (
+	Address  knx.IndividualAddress = 0x11FF // 1.1.255
+	Device10 knx.IndividualAddress = 0x110A // 1.1.10
+)
+
+// MaskVersion is the device descriptor type 0 the gateway reports
+// (DeviceDescriptor_Response): a KNXnet/IP device on TP1.
+const MaskVersion uint16 = 0x091A
 
 // SecureConfig describes the simulated secure gateway.
 type SecureConfig struct {
@@ -76,6 +101,10 @@ type Server struct {
 	sessions  int
 	keepalive int
 	rejected  int
+	dsRefused int
+	mgmt      []knx.LData
+	ds        *knx.DataSecure
+	progMode  bool
 	tcpAcks   int
 	writes    []Write
 	reads     []knx.GroupAddress
@@ -95,6 +124,7 @@ type channel struct {
 	data    func(knx.Frame)
 	st      *stream // nil on UDP
 	addr    knx.IndividualAddress
+	layer   byte
 	txSeq   byte
 	rxSeq   byte
 }
@@ -136,7 +166,8 @@ func StartWith(o Options) (*Server, error) {
 		return nil, err
 	}
 	s := &Server{conn: conn, objects: map[knx.GroupAddress][]byte{}, short: map[knx.GroupAddress]bool{},
-		channels: map[byte]*channel{}, streams: map[*stream]bool{}, next: 1, nextSess: 1}
+		channels: map[byte]*channel{}, streams: map[*stream]bool{}, next: 1, nextSess: 1,
+		ds: o.DataSecure, progMode: o.ProgrammingMode}
 	families := []knx.Family{{ID: knx.FamilyCore, Version: 1}, {ID: knx.FamilyDeviceMgmt, Version: 1}, {ID: knx.FamilyTunnelling, Version: 1}}
 	if o.Secure != nil {
 		o.TCP = true
@@ -165,6 +196,9 @@ func StartWith(o Options) (*Server, error) {
 			Serial: [6]byte{0x00, 0xC5, 0x01, 0x02, 0x03, 0x04}, Multicast: netip.MustParseAddr("224.0.23.12"),
 			MAC: [6]byte{0x02, 0, 0, 0, 0, 0x01}, FriendlyName: "Sigma KNX simulator"},
 		Families: families,
+	}
+	if o.ProgrammingMode {
+		s.desc.Device.Status |= 0x01
 	}
 	s.wg.Add(1)
 	go func() { defer s.wg.Done(); s.loop() }()
@@ -381,15 +415,66 @@ func (s *Server) Inject(ga knx.GroupAddress, data []byte, short bool) {
 	s.short[ga] = short
 	s.mu.Unlock()
 	f := knx.GroupFrame(knx.LDataInd, ga, knx.GroupValueWrite, data, short)
-	f.Source = 0x110A
-	s.broadcast(f.Encode(), false)
+	f.Source = Device10
+	s.broadcast(s.seal(f).Encode(), false)
+}
+
+// seal protects a frame of the simulated bus device when its group is
+// secured.
+func (s *Server) seal(f knx.LData) knx.LData {
+	if s.ds == nil {
+		return f
+	}
+	if sf, err := s.ds.Seal(f); err == nil {
+		return sf
+	}
+	return f
+}
+
+// DataSecureRefused counts secured frames from tunnels that did not verify
+// (and plain frames to secured groups).
+func (s *Server) DataSecureRefused() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dsRefused
+}
+
+// Management lists the point-to-point frames clients sent to the gateway
+// (device management: descriptor, property, memory reads).
+func (s *Server) Management() []knx.LData {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]knx.LData(nil), s.mgmt...)
+}
+
+// busmon turns a cEMI L_Data frame into the L_Busmon.ind a busmonitor
+// tunnel sees: status and timestamp as additional information, then the
+// TP1 frame (control field, source, destination, address type with hop
+// count and length, the TPDU, and the check octet: the inverted XOR of the
+// others).
+func busmon(cemi []byte, ts uint16) []byte {
+	f, err := knx.ParseLData(cemi)
+	if err != nil {
+		return nil
+	}
+	raw := f.Encode()
+	ai := int(raw[1])
+	l := raw[2+ai:] // ctrl1 ctrl2 src src dst dst len apdu...
+	tp := []byte{l[0], l[2], l[3], l[4], l[5], l[1]&0x80 | l[1]&0x70 | l[6]&0x0F}
+	tp = append(tp, l[7:]...)
+	var x byte
+	for _, b := range tp {
+		x ^= b
+	}
+	tp = append(tp, ^x)
+	return append([]byte{knx.LBusmonInd, 7, 0x03, 0x01, 0x00, 0x04, 0x02, byte(ts >> 8), byte(ts)}, tp...)
 }
 
 // InjectDuplicate sends an indication and then repeats it with the same
 // sequence number, as a gateway does when it misses the client's ack.
 func (s *Server) InjectDuplicate(ga knx.GroupAddress, data []byte, short bool) {
 	f := knx.GroupFrame(knx.LDataInd, ga, knx.GroupValueWrite, data, short)
-	f.Source = 0x110A
+	f.Source = Device10
 	s.broadcast(f.Encode(), true)
 }
 
@@ -400,8 +485,13 @@ func (s *Server) broadcast(cemi []byte, twice bool) {
 		f    knx.Frame
 	}
 	var outs []out
+	ts := uint16(time.Now().UnixMilli())
 	for _, c := range s.channels {
-		f := knx.TunnelRequest{Channel: c.id, Seq: c.txSeq, CEMI: cemi}.Frame()
+		frame := cemi
+		if c.layer == knx.LayerBusmonitor {
+			frame = busmon(cemi, ts)
+		}
+		f := knx.TunnelRequest{Channel: c.id, Seq: c.txSeq, CEMI: frame}.Frame()
 		c.txSeq++
 		outs = append(outs, out{c.data, f})
 	}
@@ -634,8 +724,8 @@ func (s *Server) handle(svc uint16, body []byte, reply replier, st *stream) {
 			reply(s.desc.DescriptionResponseFrame(), h)
 		}
 	case svcSearchRequestExt:
-		h, err := knx.ParseEndpointRequest(body)
-		if err == nil {
+		h, srps, err := knx.ParseSearchRequestExtended(body)
+		if err == nil && s.desc.Matches(srps) {
 			reply(s.searchResponseExt(), h)
 		}
 	case knx.SvcConnectRequest:
@@ -689,8 +779,10 @@ func (s *Server) handle(svc uint16, body []byte, reply replier, st *stream) {
 // response's endpoint and DIBs plus the secured service families DIB
 // (type 0x06) and the tunnelling information DIB (type 0x07: maximum APDU
 // length, then each tunnel address with its usable, authorised and free
-// flags). Search parameter blocks are not evaluated; the answer always
-// carries every DIB, which a requester that asked for fewer can skip.
+// flags). Mandatory search parameter blocks (programming mode, MAC
+// address, service family) are evaluated and a gateway that does not meet
+// them stays silent; the answer always carries every DIB, which a
+// requester that asked for fewer can skip.
 const (
 	svcSearchRequestExt  uint16 = 0x020B
 	svcSearchResponseExt uint16 = 0x020C
@@ -727,6 +819,10 @@ func (s *Server) searchResponseExt() knx.Frame {
 
 func (s *Server) connect(body []byte, reply replier, st *stream) {
 	r, err := knx.ParseConnectRequest(body)
+	if err == nil && r.Layer == knx.LayerRaw {
+		reply(knx.ConnectResponse{Status: knx.StatusTunnellingLayer}.Frame(), r.Control)
+		return
+	}
 	if err != nil {
 		code := knx.StatusConnectionOption
 		if knx.IsConnTypeError(err) {
@@ -746,7 +842,7 @@ func (s *Server) connect(body []byte, reply replier, st *stream) {
 	if s.next == 0 {
 		s.next = 1
 	}
-	c := &channel{id: id, st: st, addr: knx.IndividualAddress(0x11F0 + uint16(id)),
+	c := &channel{id: id, st: st, addr: knx.IndividualAddress(0x11F0 + uint16(id)), layer: r.Layer,
 		control: func(f knx.Frame) { reply(f, r.Control) }, data: func(f knx.Frame) { reply(f, r.Data) }}
 	s.channels[id] = c
 	s.connects++
@@ -799,16 +895,43 @@ func (s *Server) tunnel(body []byte, reply replier, st *stream) {
 		return
 	}
 	f, err := knx.ParseLData(r.CEMI)
-	if err != nil || f.Code != knx.LDataReq {
-		return
+	if err != nil || f.Code != knx.LDataReq || c.layer == knx.LayerBusmonitor {
+		return // a busmonitor tunnel cannot send
 	}
-	// The frame "went out on the bus": confirm it to the sender.
+	// The frame "went out on the bus": what it does is recorded, then it is
+	// confirmed to the sender and shown to busmonitor tunnels, then any
+	// answer follows.
 	con := f
 	con.Code = knx.LDataCon
 	con.Source = c.addr
+	ind := f
+	ind.Code, ind.Source = knx.LDataInd, c.addr
+	var answer func()
+	switch {
+	case !f.GroupTarget || f.Dest == 0:
+		answer = s.management(c, f)
+	default:
+		answer = s.group(c, f)
+	}
 	s.sendTo(c, con.Encode())
-	if !f.GroupTarget {
-		return
+	s.busmonOnly(ind.Encode())
+	if answer != nil {
+		answer()
+	}
+}
+
+// group handles a group frame from a tunnel and returns the answer to send
+// after the confirmation, if any.
+func (s *Server) group(c *channel, f knx.LData) func() {
+	if s.ds != nil {
+		f.Source = c.addr
+		var err error
+		if f, err = s.ds.Open(f); err != nil {
+			s.mu.Lock()
+			s.dsRefused++
+			s.mu.Unlock()
+			return nil
+		}
 	}
 	switch f.APCI {
 	case knx.GroupValueWrite:
@@ -825,10 +948,89 @@ func (s *Server) tunnel(body []byte, reply replier, st *stream) {
 		s.mu.Unlock()
 		if ok {
 			resp := knx.GroupFrame(knx.LDataInd, f.Group(), knx.GroupValueResponse, v, s.isShort(f.Group()))
-			resp.Source = 0x110A
-			s.sendTo(c, resp.Encode())
+			resp.Source = Device10
+			return func() { s.sendTo(c, s.seal(resp).Encode()) }
 		}
 	}
+	return nil
+}
+
+// busmonOnly sends a frame to the busmonitor tunnels only.
+func (s *Server) busmonOnly(cemi []byte) {
+	ts := uint16(time.Now().UnixMilli())
+	for _, c := range s.chans() {
+		if c.layer == knx.LayerBusmonitor {
+			s.sendTo(c, busmon(cemi, ts))
+		}
+	}
+}
+
+// management answers connectionless device management addressed to the
+// gateway: DeviceDescriptor_Read (type 0, the mask version),
+// PropertyValue_Read of the device object (object 0: serial number PID
+// 11, manufacturer PID 12, programming mode PID 54 as one octet) and, in
+// programming mode, the broadcast IndividualAddress_Read. Other requests
+// are recorded only.
+func (s *Server) management(c *channel, f knx.LData) func() {
+	s.mu.Lock()
+	s.mgmt = append(s.mgmt, f)
+	prog := s.progMode
+	serial := s.desc.Device.Serial
+	s.mu.Unlock()
+	var out [][]byte
+	send := func() {
+		for _, b := range out {
+			s.sendTo(c, b)
+		}
+	}
+	reply := func(apci uint16, short byte, data []byte) {
+		r := knx.IndividualFrame(knx.LDataInd, c.addr, apci, short, data)
+		r.Source = Address
+		out = append(out, r.Encode())
+	}
+	if f.GroupTarget { // broadcast
+		if f.APCI == knx.IndividualAddressRead && prog {
+			r := knx.GroupFrame(knx.LDataInd, 0, knx.IndividualAddressResponse, nil, true)
+			r.Source = Address
+			out = append(out, r.Encode())
+		}
+		return send
+	}
+	if knx.IndividualAddress(f.Dest) != Address || f.Control() {
+		return send
+	}
+	switch f.APCI {
+	case knx.DeviceDescriptorRead:
+		if f.Short == 0 {
+			reply(knx.DeviceDescriptorResponse, 0, []byte{byte(MaskVersion >> 8), byte(MaskVersion & 0xFF)})
+		}
+	case knx.PropertyValueRead:
+		if len(f.Data) != 4 {
+			return send
+		}
+		obj, pid, count, start := f.Data[0], f.Data[1], f.Data[2]>>4, uint16(f.Data[2]&0x0F)<<8|uint16(f.Data[3])
+		var v []byte
+		if obj == 0 && count == 1 && start == 1 {
+			switch pid {
+			case 11:
+				v = serial[:]
+			case 12:
+				v = []byte{0x00, 0xC5}
+			case 54:
+				if prog {
+					v = []byte{1}
+				} else {
+					v = []byte{0}
+				}
+			}
+		}
+		hdr := append([]byte(nil), f.Data...)
+		if v == nil {
+			hdr[2] &= 0x0F // count 0: the property cannot be read
+		}
+		reply(knx.PropertyValueResponse, 0, append(hdr, v...))
+	}
+	return send
 }
 
 // SetShort stores a 6-bit (DPT 1/2/3) group object.

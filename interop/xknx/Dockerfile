@@ -7,7 +7,7 @@
 # gateway and reader of its keyrings, xknxproject as a reader of its
 # project exports, with client.py (ours) driving them.
 #
-#   docker build -t sigma-knxsim-xknx:3.20.0 .
+#   docker build -t sigma-knxsim-xknx:3.20.0-r2 .
 
 FROM python:3.12-slim
 RUN pip install --no-cache-dir xknx==3.20.0 xknxproject==3.10.0

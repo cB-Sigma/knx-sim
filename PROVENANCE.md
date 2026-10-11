@@ -26,6 +26,8 @@ their test suites; no code was taken from them.
 | Area (files) | Followed |
 |---|---|
 | Gateway (sim/sim.go) | KNX Standard v2.1 volume 3 part 8 (KNXnet/IP core, core v2 over TCP, tunnelling, KNXnet/IP Secure), as the knx module reads it; it reuses that module's frames and secure primitives |
+| Data Secure, busmonitor, device management, extended search parameters (sim/sim.go, v0.2.0) | the knx module's Data Secure, frames and search parameter matching; the TP1 frame layout (control field, addresses, length, check octet) and the device object properties from KNX Standard v2.1 volume 3 parts 2 and 7 as the knx module's PROVENANCE names them |
+| Router (sim/router.go, v0.2.0) | the knx module's router (routing, flow control, KNX IP Secure routing) |
 | ETS files (sim/ets.go) | the ETS project and keyring layouts as the knx module reads them; the zip encryption of the knx module (PKWARE APPNOTE 6.1, WinZip AES) |
 | Command (cmd/knxsim) | none (flags are our own) |
 | Interop peers (interop/) | xknx's and xknxproject's public APIs, read to write interop/xknx/client.py |
@@ -37,7 +39,7 @@ chapter numbers in our own words.
 
 | Test | Source |
 |---|---|
-| tunnel_test.go, link_test.go, ets_test.go, example_test.go, sim/sim_test.go, cmd/knxsim/main_test.go | the knx client against this simulator, written from the same descriptions; not a real gateway |
+| tunnel_test.go, link_test.go, ets_test.go, example_test.go, v2_test.go, sim/sim_test.go, cmd/knxsim/main_test.go | the knx client against this simulator, written from the same descriptions; not a real gateway |
 | interop/xknx_test.go | xknx 3.20.0 and xknxproject 3.10.0 as independent client and reader |
 
 All passwords, keys and addresses are made-up demo values.
