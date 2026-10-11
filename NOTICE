@@ -1,0 +1,45 @@
+knx-sim (a simulated KNXnet/IP gateway with KNX IP Secure, and ETS file generators, in Go)
+Copyright 2026 Abhinav Gautam
+
+This module is licensed under the Apache License, Version 2.0 (LICENSE).
+
+The code was written for SigmaM2M, a oneM2M platform, from the
+descriptions listed in PROVENANCE.md. It contains no code from other
+projects. The source files that come from SigmaM2M carry no per-file
+copyright header (the convention of the code they come from); the
+copyright line above covers them. Files added for this module carry
+"Copyright 2026 Abhinav Gautam" and "SPDX-License-Identifier: Apache-2.0".
+
+Dependencies
+------------
+
+- github.com/cB-Sigma/knx (Apache-2.0, Copyright 2026 Abhinav Gautam):
+  the frames, KNX IP Secure primitives and zip encryption the simulator
+  is built on.
+- The Go standard library (BSD-3-Clause, Copyright The Go Authors).
+
+Interop test peers (interop/, not part of the module's packages)
+------------------------------------------------------------------
+
+The nested test-only module interop/ runs xknx 3.20.0
+(github.com/XKNX/xknx, MIT) and xknxproject 3.10.0
+(github.com/XKNX/xknxproject, GPL-2.0-only), installed from PyPI in a
+Docker container built on the tester's machine. interop/xknx/client.py,
+which drives them, is ours (Apache-2.0). None of their code is included
+in this repository or linked into the module.
+
+Trademarks
+----------
+
+KNX and ETS are trademarks of the KNX Association cvba. They are used
+here only to name the protocol and the file formats the simulator
+produces. This project is not affiliated with, certified, sponsored or
+endorsed by the KNX Association. The simulated files say "ETS" in their
+CreatedBy attributes because readers expect it; they were not written by
+ETS.
+
+Test data
+---------
+
+Every password, key, serial number and address in this module is a
+made-up demo value; none belongs to a real installation.
