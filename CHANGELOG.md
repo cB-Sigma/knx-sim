@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+Fixed:
+
+- A tunnel takes the lowest free one of the four announced addresses
+  (1.1.241 to 1.1.244) instead of 1.1.240 plus its channel id, so the
+  address no longer grows with every connection (1.1.245 and up from the
+  fifth, 1.1.255 at channel 15), stays among the Data Secure senders
+  `Options.DataSecure` documents, and is reused once its tunnel has
+  disconnected. A fifth tunnel while four are open is still refused with
+  E_NO_MORE_CONNECTIONS. Reported by @boeboe (#1).
+
 ## v0.2.0 (2026-10-11)
 
 Added, on knx v0.2.0:

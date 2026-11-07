@@ -213,3 +213,54 @@ func TestKNXRoutingUnicast(t *testing.T) {
 		t.Errorf("routed write = %+v, %v", f, err)
 	}
 }
+
+// A tunnel takes the lowest free one of the four announced addresses
+// (1.1.241 to 1.1.244), whatever its channel id, so six connections in a
+// row stay within them; an address freed by a disconnect is reused; a
+// fifth tunnel while four are open is refused with E_NO_MORE_CONNECTIONS.
+func TestKNXTunnelAddressSlots(t *testing.T) {
+	sim := startSim(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	first, last := knx.IndividualAddress(0x11F1), knx.IndividualAddress(0x11F4)
+	closed := func(tn *knx.Tunnel) {
+		tn.Close()
+		eventually(t, 2*time.Second, "the gateway to drop the channel", func() bool { return sim.Channels() == 0 })
+	}
+	for i := 0; i < 6; i++ {
+		tn, err := knx.DialTunnel(ctx, sim.Addr(), knx.TunnelOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tn.Address < first || tn.Address > last {
+			t.Errorf("connection %d: address %s, want 1.1.241 to 1.1.244", i+1, tn.Address)
+		}
+		closed(tn)
+	}
+	var open []*knx.Tunnel
+	for i := 0; i < 4; i++ {
+		tn, err := knx.DialTunnel(ctx, sim.Addr(), knx.TunnelOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(tn.Close)
+		if want := first + knx.IndividualAddress(i); tn.Address != want {
+			t.Errorf("tunnel %d: address %s, want %s", i+1, tn.Address, want)
+		}
+		open = append(open, tn)
+	}
+	if _, err := knx.DialTunnel(ctx, sim.Addr(), knx.TunnelOptions{}); err == nil || !strings.Contains(err.Error(), "no more connections") {
+		t.Errorf("fifth tunnel: %v, want E_NO_MORE_CONNECTIONS", err)
+	}
+	// The second tunnel's address is free again and goes to the next one.
+	open[1].Close()
+	eventually(t, 2*time.Second, "the gateway to drop the channel", func() bool { return sim.Channels() == 3 })
+	tn, err := knx.DialTunnel(ctx, sim.Addr(), knx.TunnelOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tn.Close()
+	if tn.Address != first+1 {
+		t.Errorf("after a disconnect: address %s, want %s reused", tn.Address, first+1)
+	}
+}

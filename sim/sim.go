@@ -804,7 +804,7 @@ func (s *Server) searchResponseExt() knx.Frame {
 	s.mu.Unlock()
 	body = append(body, byte(4+4*maxChannels), 0x07, 0x00, 0xF8) // max APDU 248
 	for i := 1; i <= maxChannels; i++ {
-		a := knx.IndividualAddress(0x11F0 + uint16(i))
+		a := tunnelAddress(i)
 		flags := byte(0x04) // usable
 		if s.sec == nil || s.sec.AllowPlain {
 			flags |= 0x02 // authorised without a secure session
@@ -815,6 +815,32 @@ func (s *Server) searchResponseExt() knx.Frame {
 		body = append(body, byte(a>>8), byte(a), 0x00, flags)
 	}
 	return knx.Frame{Service: svcSearchResponseExt, Body: body}
+}
+
+// tunnelAddress is the individual address of tunnelling slot i (1 to
+// maxChannels): 1.1.241 to 1.1.244, the slots the extended search
+// announces.
+func tunnelAddress(i int) knx.IndividualAddress { return knx.IndividualAddress(0x11F0 + uint16(i)) }
+
+// freeAddress is the lowest announced tunnel address no channel holds
+// (busmonitor tunnels hold one too). The caller holds s.mu and has checked
+// that there are fewer than maxChannels channels, so one is free; the
+// address goes back to the pool when the channel is removed.
+func (s *Server) freeAddress() knx.IndividualAddress {
+	for i := 1; i <= maxChannels; i++ {
+		a := tunnelAddress(i)
+		free := true
+		for _, c := range s.channels {
+			if c.addr == a {
+				free = false
+				break
+			}
+		}
+		if free {
+			return a
+		}
+	}
+	return tunnelAddress(maxChannels)
 }
 
 func (s *Server) connect(body []byte, reply replier, st *stream) {
@@ -842,7 +868,7 @@ func (s *Server) connect(body []byte, reply replier, st *stream) {
 	if s.next == 0 {
 		s.next = 1
 	}
-	c := &channel{id: id, st: st, addr: knx.IndividualAddress(0x11F0 + uint16(id)), layer: r.Layer,
+	c := &channel{id: id, st: st, addr: s.freeAddress(), layer: r.Layer,
 		control: func(f knx.Frame) { reply(f, r.Control) }, data: func(f knx.Frame) { reply(f, r.Data) }}
 	s.channels[id] = c
 	s.connects++
